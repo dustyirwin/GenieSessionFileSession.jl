@@ -3,27 +3,65 @@ module GenieSessionFileSession
 import Genie, GenieSession
 import Serialization, Logging
 
-const SESSIONS_PATH = Ref{String}(Genie.Configuration.isprod() ? "sessions" : mktempdir())
+# 🔑 Precompile-safe: literal initializer. Real value set in __init__.
+const SESSIONS_PATH = Ref{String}("")
 
 function sessions_path(path::String)
-  SESSIONS_PATH[] = normpath(path) |> abspath
+    SESSIONS_PATH[] = normpath(path) |> abspath
 end
+
 function sessions_path()
-  SESSIONS_PATH[]
+    p = SESSIONS_PATH[]
+    if isempty(p)
+        # Lazy fallback if __init__ didn't run or was skipped
+        p = if Sys.iswindows()
+            joinpath(get(ENV, "LOCALAPPDATA",
+                         joinpath(homedir(), "AppData", "Local")),
+                     "UCIAgg", "sessions")
+        else
+            joinpath(homedir(), ".local", "share", "UCIAgg", "sessions")
+        end
+        mkpath(p)
+        SESSIONS_PATH[] = p
+    end
+    return p
 end
 
-
-function setup_folder()
-  if ! isdir(sessions_path())
-    @debug "Attempting to create sessions folder at $(sessions_path())"
-
-    mkpath(sessions_path())
-  end
+function _runtime_session_folder()
+    base = if Sys.iswindows()
+        get(ENV, "LOCALAPPDATA", joinpath(homedir(), "AppData", "Local"))
+    else
+        joinpath(homedir(), ".local", "share")
+    end
+    return joinpath(base, "UCIAgg", "sessions")
 end
 
+function setup_folder(folder::String)
+    try
+        mkpath(folder)
+        SESSIONS_PATH[] = normpath(folder) |> abspath
+    catch e
+        fallback = _runtime_session_folder()
+        @warn "GenieSessionFileSession: session folder $folder not writable ($(typeof(e))); using $fallback instead"
+        try
+            mkpath(fallback)
+            SESSIONS_PATH[] = normpath(fallback) |> abspath
+        catch e2
+            @warn "GenieSessionFileSession: fallback $fallback also failed" exception=e2
+        end
+    end
+end
 
 function __init__()
-  setup_folder()
+    try
+        # 🔑 Compute path at RUNTIME, not precompile time.
+        # This is what `const` initialization used to do — now it lives here
+        # so the path isn't baked into the sysimage.
+        SESSIONS_PATH[] = Genie.Configuration.isprod() ? "sessions" : mktempdir()
+        setup_folder(SESSIONS_PATH[])
+    catch e
+        @warn "GenieSessionFileSession.__init__ skipped due to: $e"
+    end
 end
 
 
